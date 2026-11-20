@@ -1,0 +1,156 @@
+# ==============================================================================
+# M.A.D.D.Y. — Comprehensive .gitignore
+# ==============================================================================
+
+# ==============================================================================
+# 1. Environment & Secrets
+# ==============================================================================
+.env
+*.env
+!.env.example
+
+# ==============================================================================
+# 2. Virtual Environments
+# ==============================================================================
+.venv/
+.venv-linux/
+venv/
+env/
+
+# ==============================================================================
+# 3. Python Compilation & Packaging
+# ==============================================================================
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==============================================================================
+# 4. Testing & Coverage
+# ==============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.cache/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================================================================
+# 5. Logs, Databases & Runtime State
+# ==============================================================================
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+*.pid
+
+# ==============================================================================
+# 6. Audio, Voice & Generated Artifacts
+# ==============================================================================
+voice/generated/
+voice/cache/
+captures/
+*.temp.*
+
+# ==============================================================================
+# 7. Personal Data & Memory Capture Sessions (never commit)
+# ==============================================================================
+memory/capture_sessions/
+config/contacts.json
+!config/contacts.json.example
+
+# ==============================================================================
+# 8. Telegram-Related Files (excluded from public repo)
+# ==============================================================================
+telegram.cmd
+telegram.sh
+tel.cmd
+tel.sh
+teloff.cmd
+teloff.sh
+scripts/start_telegram_daemon.vbs
+integrations/messaging/telegram_bot.py
+integrations/messaging/telegram_client.py
+core/tools/telegram_tool.py
+tests/test_telegram_bot.py
+logs/telegram_bot.*
+
+# ==============================================================================
+# 9. Scratch / Development-Only Files & Reference Workspaces
+# ==============================================================================
+scratch/
+.backboard/
+.agents/
+.reference/
+reference/
+.claude/
+.gstack/
+.maddy/
+
+# ==============================================================================
+# 10. Downloaded and local-only material
+# ==============================================================================
+downloads/
+browser_profiles/
+screenshots/
+recordings/
+models/
+voice/models/
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.bin
+*.gguf
+*.tflite
+
+# ==============================================================================
+# 11. OS & Editor Artifacts
+# ==============================================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ==============================================================================
+# 12. Lock Files (uv.lock is large; regenerated from pyproject.toml)
+# ==============================================================================
+uv.lock
+
+# Local project environments and tool caches
+.direnv/
+.python-version
+.ruff_cache/
+.tox/
+.nox/
