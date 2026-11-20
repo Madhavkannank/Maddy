@@ -126,6 +126,7 @@ class MaddyAgentCore:
         current_depth: int = 1,
         max_spawn_depth: int = 3,
         enable_delegation: bool = True,
+        verification_engine: Optional[Any] = None,
     ):
         self.llm_client = llm_client or CloudLLMClient()
         self.tool_registry = tool_registry or ToolRegistry()
@@ -189,11 +190,14 @@ class MaddyAgentCore:
             from core.tools.cron_tool import CronJobManageTool
             self.tool_registry.register(CronJobManageTool())
 
-        try:
-            from verification.engine import VerificationEngine
-            self.verification_engine: Optional[Any] = VerificationEngine()
-        except Exception:
-            self.verification_engine = None
+        if verification_engine is not None:
+            self.verification_engine = verification_engine
+        else:
+            try:
+                from verification.engine import VerificationEngine
+                self.verification_engine = VerificationEngine()
+            except Exception:
+                self.verification_engine = None
 
         self.working_memory: Optional[WorkingMemory] = None
 
@@ -376,114 +380,17 @@ class MaddyAgentCore:
                     ],
                 )
 
-                # ── 3. EXECUTE TOOLS (PERSIST-BEFORE-EXECUTE) ─────────────────────
+                # ── 3. EXECUTE TOOLS (PERSIST-BEFORE-EXECUTE & UNIFIED VERIFICATION) ─
                 for tc in model_resp.tool_calls:
-                    tool_obj = self.tool_registry.get_tool(tc.name)
-                    tier = (
-                        tool_obj.operation_tier(tc.arguments)
-                        if tool_obj
-                        else PermissionTier.SYSTEM_IMPACTING
-                    )
-
-                    # a. PERSIST-BEFORE-EXECUTE INVARIANT
-                    self.trace_store.record_tool_call_planned(
+                    if self._execute_single_tool(
                         task_id=active_task_id,
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        arguments=tc.arguments,
-                        tier=tier.value,
+                        tc=tc,
                         step_id=step_id,
-                    )
-
-                    tool_result_content: str = ""
-                    execution_status = "completed"
-                    error_detail: Optional[str] = None
-
-                    try:
-                        # b. LOOP GUARD CHECK
-                        loop_guard.record_and_check(tc.name, tc.arguments)
-
-                        # c. DETERMINISTIC PERMISSION GATE CHECK
-                        self.permission_gate.check_permission(tc.name, tier, tc.arguments)
-
-                        # d. ACT: EXECUTE TOOL
-                        result: ToolResult = self.tool_registry.execute_tool(
-                            name=tc.name,
-                            arguments=tc.arguments,
-                            timeout_seconds=self.tool_timeout_seconds,
-                        )
-
-                        if result.success:
-                            # Verification grounding (Rule 16 & Rule 32)
-                            if self.verification_engine:
-                                try:
-                                    from tools.call import ToolCall as VToolCall
-                                    v_tc = VToolCall(call_id=tc.id, name=tc.name, arguments=tc.arguments)
-                                    v_res, v_report = self.verification_engine.verify_tool_execution(v_tc, result)
-                                    if not v_res.success:
-                                        execution_status = "failed"
-                                        had_tool_failures = True
-                                        error_detail = v_res.error.get("message") if isinstance(v_res.error, dict) else str(v_res.error)
-                                        tool_result_content = f"Verification Failure: {getattr(v_report, 'evidence_summary', error_detail)}"
-                                except Exception as ve:
-                                    logger.debug("Verification check skipped: %s", ve)
-
-                            if execution_status != "failed":
-                                tool_result_content = result.output
-                                # Mutating success resets loop streak
-                                if tier == PermissionTier.SYSTEM_IMPACTING:
-                                    loop_guard.reset_streak_on_progress()
-                        else:
-                            execution_status = "failed"
-                            had_tool_failures = True
-                            error_detail = result.error
-                            tool_result_content = f"Tool Error: {result.error}\nOutput: {result.output}".strip()
-
-                    except DegenerateLoopError as dle:
-                        execution_status = "blocked"
+                        step_index=step_index,
+                        loop_guard=loop_guard,
+                        messages=messages,
+                    ):
                         had_tool_failures = True
-                        error_detail = dle.message
-                        tool_result_content = f"Guardrail Blocked: {dle.message}"
-                    except PermissionDeniedError as pde:
-                        execution_status = "blocked"
-                        had_tool_failures = True
-                        error_detail = pde.message
-                        tool_result_content = f"Permission Denied: {pde.message}"
-                    except Exception as exc:
-                        execution_status = "failed"
-                        had_tool_failures = True
-                        error_detail = str(exc)
-                        tool_result_content = f"System Error: {str(exc)}"
-
-                    # e. PERSIST EXECUTION RESULT IN TRACE STORE
-                    self.trace_store.record_tool_call_completed(
-                        tool_call_id=tc.id,
-                        result_output=tool_result_content,
-                        error_info=error_detail,
-                        status=execution_status,
-                    )
-
-                    # f. OBSERVE: STRICT ROLE-ALTERNATION TOOL MESSAGE
-                    tool_msg = {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "content": redact_text(truncate_tool_output(tool_result_content)),
-                    }
-                    messages.append(tool_msg)
-                    self.trace_store.append_message(
-                        active_task_id,
-                        role="tool",
-                        content=tool_result_content,
-                        tool_call_id=tc.id,
-                    )
-                    if self.working_memory:
-                        self.working_memory.add_observation(
-                            step=step_index,
-                            tool=tc.name,
-                            output=tool_result_content,
-                            success=(execution_status == "completed"),
-                        )
 
                 # ── 3.5 CHECKPOINT STATE SNAPSHOT ─────────────────────────────────
                 self.trace_store.save_checkpoint(
@@ -713,91 +620,17 @@ class MaddyAgentCore:
                     ],
                 )
 
-                # ── 3. EXECUTE TOOLS (PERSIST-BEFORE-EXECUTE) ─────────────────────
+                # ── 3. EXECUTE TOOLS (PERSIST-BEFORE-EXECUTE & UNIFIED VERIFICATION) ─
                 for tc in model_resp.tool_calls:
-                    tool_obj = self.tool_registry.get_tool(tc.name)
-                    tier = (
-                        tool_obj.operation_tier(tc.arguments)
-                        if tool_obj
-                        else PermissionTier.SYSTEM_IMPACTING
-                    )
-
-                    self.trace_store.record_tool_call_planned(
+                    if self._execute_single_tool(
                         task_id=task_id,
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        arguments=tc.arguments,
-                        tier=tier.value,
+                        tc=tc,
                         step_id=step_id,
-                    )
-
-                    tool_result_content: str = ""
-                    execution_status = "completed"
-                    error_detail: Optional[str] = None
-
-                    try:
-                        loop_guard.record_and_check(tc.name, tc.arguments)
-                        self.permission_gate.check_permission(tc.name, tier, tc.arguments)
-
-                        result: ToolResult = self.tool_registry.execute_tool(
-                            name=tc.name,
-                            arguments=tc.arguments,
-                            timeout_seconds=self.tool_timeout_seconds,
-                        )
-
-                        if result.success:
-                            tool_result_content = result.output
-                            if tier == PermissionTier.SYSTEM_IMPACTING:
-                                loop_guard.reset_streak_on_progress()
-                        else:
-                            execution_status = "failed"
-                            had_tool_failures = True
-                            error_detail = result.error
-                            tool_result_content = f"Tool Error: {result.error}\nOutput: {result.output}".strip()
-
-                    except DegenerateLoopError as dle:
-                        execution_status = "blocked"
+                        step_index=step_index,
+                        loop_guard=loop_guard,
+                        messages=messages,
+                    ):
                         had_tool_failures = True
-                        error_detail = dle.message
-                        tool_result_content = f"Guardrail Blocked: {dle.message}"
-                    except PermissionDeniedError as pde:
-                        execution_status = "blocked"
-                        had_tool_failures = True
-                        error_detail = pde.message
-                        tool_result_content = f"Permission Denied: {pde.message}"
-                    except Exception as exc:
-                        execution_status = "failed"
-                        had_tool_failures = True
-                        error_detail = str(exc)
-                        tool_result_content = f"System Error: {str(exc)}"
-
-                    self.trace_store.record_tool_call_completed(
-                        tool_call_id=tc.id,
-                        result_output=tool_result_content,
-                        error_info=error_detail,
-                        status=execution_status,
-                    )
-
-                    tool_msg = {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "content": redact_text(truncate_tool_output(tool_result_content)),
-                    }
-                    messages.append(tool_msg)
-                    self.trace_store.append_message(
-                        task_id,
-                        role="tool",
-                        content=tool_result_content,
-                        tool_call_id=tc.id,
-                    )
-                    if self.working_memory:
-                        self.working_memory.add_observation(
-                            step=step_index,
-                            tool=tc.name,
-                            output=tool_result_content,
-                            success=(execution_status == "completed"),
-                        )
 
                 # Checkpoint step
                 self.trace_store.save_checkpoint(
@@ -878,5 +711,149 @@ class MaddyAgentCore:
             "messages": messages,
             "resumed": True,
         }
+
+    def _execute_single_tool(
+        self,
+        task_id: str,
+        tc: Any,
+        step_id: str,
+        step_index: int,
+        loop_guard: LoopGuard,
+        messages: List[Dict[str, Any]],
+    ) -> bool:
+        """Shared unified tool-execution pipeline for run_turn and resume_turn.
+
+        Guarantees deterministic safety invariants across normal and resumed executions:
+        1. Operation tier calculation
+        2. Persist-before-execute record in trace store
+        3. Loop guard validation
+        4. Deterministic permission gate check
+        5. Timed tool execution
+        6. Environment verification grounding (Rule 16 & Rule 32)
+        7. Persist completed record in trace store
+        8. Append role='tool' message & working memory observation
+
+        Returns:
+            bool: True if execution failed or was blocked, False if completed successfully.
+        """
+        tool_obj = self.tool_registry.get_tool(tc.name)
+        tier = (
+            tool_obj.operation_tier(tc.arguments)
+            if tool_obj and hasattr(tool_obj, "operation_tier")
+            else (getattr(tool_obj, "tier", PermissionTier.SYSTEM_IMPACTING) if tool_obj else PermissionTier.SYSTEM_IMPACTING)
+        )
+
+        # a. PERSIST-BEFORE-EXECUTE INVARIANT
+        self.trace_store.record_tool_call_planned(
+            task_id=task_id,
+            tool_call_id=tc.id,
+            tool_name=tc.name,
+            arguments=tc.arguments,
+            tier=tier.value,
+            step_id=step_id,
+        )
+
+        tool_result_content: str = ""
+        execution_status = "completed"
+        error_detail: Optional[str] = None
+        tool_failed = False
+
+        try:
+            # b. LOOP GUARD CHECK
+            loop_guard.record_and_check(tc.name, tc.arguments)
+
+            # c. DETERMINISTIC PERMISSION GATE CHECK
+            self.permission_gate.check_permission(tc.name, tier, tc.arguments)
+
+            # d. ACT: EXECUTE TOOL
+            result: ToolResult = self.tool_registry.execute_tool(
+                name=tc.name,
+                arguments=tc.arguments,
+                timeout_seconds=self.tool_timeout_seconds,
+            )
+
+            if result.success:
+                # Verification grounding (Rule 16 & Rule 32)
+                if self.verification_engine:
+                    try:
+                        from tools.call import ToolCall as VToolCall
+                        from verification.schema import VerificationOutcome
+                        v_tc = VToolCall(call_id=tc.id, name=tc.name, arguments=tc.arguments)
+                        v_res, v_report = self.verification_engine.verify_tool_execution(v_tc, result)
+                        if not v_res.success or v_report.outcome in (VerificationOutcome.FAILED, VerificationOutcome.VERIFICATION_ERROR):
+                            execution_status = "failed"
+                            tool_failed = True
+                            error_detail = (
+                                (v_res.error.get("message") if isinstance(v_res.error, dict) else str(v_res.error))
+                                if v_res.error else (v_report.evidence_summary or "Verification failed")
+                            )
+                            tool_result_content = f"Verification Failure: {error_detail}"
+                        else:
+                            tool_result_content = result.output
+                            if tier == PermissionTier.SYSTEM_IMPACTING:
+                                loop_guard.reset_streak_on_progress()
+                    except Exception as ve:
+                        logger.error("Verification engine failed with exception: %s", ve, exc_info=True)
+                        execution_status = "failed"
+                        tool_failed = True
+                        error_detail = f"Verification engine error: {ve}"
+                        tool_result_content = f"Verification Error: {ve}"
+                else:
+                    tool_result_content = result.output
+                    if tier == PermissionTier.SYSTEM_IMPACTING:
+                        loop_guard.reset_streak_on_progress()
+            else:
+                execution_status = "failed"
+                tool_failed = True
+                error_detail = result.error
+                tool_result_content = f"Tool Error: {result.error}\nOutput: {result.output}".strip()
+
+        except DegenerateLoopError as dle:
+            execution_status = "blocked"
+            tool_failed = True
+            error_detail = dle.message
+            tool_result_content = f"Guardrail Blocked: {dle.message}"
+        except PermissionDeniedError as pde:
+            execution_status = "blocked"
+            tool_failed = True
+            error_detail = pde.message
+            tool_result_content = f"Permission Denied: {pde.message}"
+        except Exception as exc:
+            execution_status = "failed"
+            tool_failed = True
+            error_detail = str(exc)
+            tool_result_content = f"System Error: {str(exc)}"
+
+        # e. PERSIST EXECUTION RESULT IN TRACE STORE
+        self.trace_store.record_tool_call_completed(
+            tool_call_id=tc.id,
+            result_output=tool_result_content,
+            error_info=error_detail,
+            status=execution_status,
+        )
+
+        # f. OBSERVE: STRICT ROLE-ALTERNATION TOOL MESSAGE
+        tool_msg = {
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "name": tc.name,
+            "content": redact_text(truncate_tool_output(tool_result_content)),
+        }
+        messages.append(tool_msg)
+        self.trace_store.append_message(
+            task_id,
+            role="tool",
+            content=tool_result_content,
+            tool_call_id=tc.id,
+        )
+        if self.working_memory:
+            self.working_memory.add_observation(
+                step=step_index,
+                tool=tc.name,
+                output=tool_result_content,
+                success=(execution_status == "completed"),
+            )
+
+        return tool_failed
 
 

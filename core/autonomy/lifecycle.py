@@ -22,6 +22,7 @@ class LifecycleGuard:
     def __init__(self, repository: JobRepository):
         self.repository = repository
         self._active_heartbeats: Dict[str, float] = {}
+        self._deadlines: Dict[str, float] = {}
 
     def reconcile_orphans(self) -> List[ScheduledJob]:
         """Detect and reconcile jobs stranded in RUNNING state due to daemon crashes or unexpected reboots.
@@ -62,9 +63,11 @@ class LifecycleGuard:
             logger.info("Successfully reconciled %d orphaned background job(s).", len(recovered))
         return recovered
 
-    def start_heartbeat(self, execution_id: str) -> None:
-        """Register the start of an active execution heartbeat."""
-        self._active_heartbeats[execution_id] = time.time()
+    def start_heartbeat(self, execution_id: str, timeout_seconds: float = 120.0) -> None:
+        """Register the start of an active execution heartbeat with strict deadline."""
+        now = time.time()
+        self._active_heartbeats[execution_id] = now
+        self._deadlines[execution_id] = now + timeout_seconds
 
     def update_heartbeat(self, execution_id: str) -> None:
         """Update last seen heartbeat timestamp for an active execution."""
@@ -73,6 +76,7 @@ class LifecycleGuard:
     def clear_heartbeat(self, execution_id: str) -> None:
         """Remove heartbeat upon execution completion."""
         self._active_heartbeats.pop(execution_id, None)
+        self._deadlines.pop(execution_id, None)
 
     def is_stalled(self, execution_id: str, timeout_seconds: float) -> bool:
         """Determine if an execution has stalled past its allowed timeout."""
@@ -80,3 +84,13 @@ class LifecycleGuard:
         if not last_hb:
             return False
         return (time.time() - last_hb) > timeout_seconds
+
+    def get_stalled_executions(self, timeout_seconds: float = 120.0) -> List[str]:
+        """Detect any active executions exceeding their allowed timeout deadline."""
+        stalled: List[str] = []
+        now = time.time()
+        for eid, start_hb in list(self._active_heartbeats.items()):
+            deadline = self._deadlines.get(eid, start_hb + timeout_seconds)
+            if now > deadline:
+                stalled.append(eid)
+        return stalled

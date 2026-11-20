@@ -51,7 +51,14 @@ class CronJobManageTool(BaseTool):
         "- 'run': Immediately trigger an execution of a job by 'job_id'.\n"
         "- 'history': View recent execution audit records for a job by 'job_id'."
     )
-    tier = PermissionTier.SAFE
+    tier = PermissionTier.SYSTEM_IMPACTING
+
+    def operation_tier(self, arguments: Dict[str, Any]) -> PermissionTier:
+        """Dynamically evaluate operation tier: read-only actions are SAFE; mutations are SYSTEM_IMPACTING."""
+        act = str(arguments.get("action", "")).strip().lower()
+        if act in ("list", "history", "status"):
+            return PermissionTier.SAFE
+        return PermissionTier.SYSTEM_IMPACTING
 
     def __init__(self, scheduler: Optional[AutonomyScheduler] = None):
         self._scheduler = scheduler

@@ -250,14 +250,15 @@ class AutonomyScheduler:
         """Worker wrapper managing execution recording, timeouts, and circuit breaker."""
         exec_id = f"exec_{uuid.uuid4().hex[:8]}"
         start_time = time.time()
-        self.lifecycle_guard.start_heartbeat(exec_id)
+        timeout = getattr(job, "timeout_seconds", None) or 120.0
+        self.lifecycle_guard.start_heartbeat(exec_id, timeout_seconds=timeout)
 
         # 1. Record execution start in SQLite repository
         self.repository.record_execution_start(
             execution_id=exec_id,
             job_id=job.id,
             started_at=start_time,
-            metadata={"goal": job.goal, "trigger_type": job.trigger_type.value},
+            metadata={"goal": job.goal, "trigger_type": job.trigger_type.value, "timeout_seconds": timeout},
         )
 
         outcome_summary: Optional[str] = None
@@ -265,17 +266,42 @@ class AutonomyScheduler:
         status = "COMPLETED"
 
         try:
-            logger.info("Executing background task '%s' (%s): '%s'", job.id, job.name, job.goal)
-            if self.runner_fn:
-                outcome_summary = self.runner_fn(job)
-            else:
-                outcome_summary = self._default_runner(job)
+            logger.info("Executing background task '%s' (%s): '%s' (timeout: %.1fs)", job.id, job.name, job.goal, timeout)
+            runner = self.runner_fn if self.runner_fn else self._default_runner
+
+            # Enforceable execution deadline wrapper
+            task_exec = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                future = task_exec.submit(runner, job)
+                try:
+                    outcome_summary = future.result(timeout=timeout)
+                except concurrent.futures.TimeoutError:
+                    task_exec.shutdown(wait=False, cancel_futures=True)
+                    raise TimeoutError(
+                        f"Autonomous task '{job.name}' ({job.id}) exceeded execution deadline of {timeout}s (timed out)."
+                    )
+            finally:
+                task_exec.shutdown(wait=False, cancel_futures=True)
 
             self.circuit_breaker.record_success(job)
             job.status = JobStatus.IDLE
             job.last_status = "SUCCESS"
             job.last_result = outcome_summary
             job.last_error = None
+
+        except TimeoutError as te:
+            error_msg = str(te)
+            status = "TIMED_OUT"
+            logger.error("Execution timed out for job '%s': %s", job.id, te)
+
+            is_tripped, backoff_delay = self.circuit_breaker.record_failure(job, error_msg)
+            job.last_error = error_msg
+            job.last_status = "TIMED_OUT"
+            if is_tripped:
+                job.enabled = False
+                job.status = JobStatus.SUSPENDED
+            else:
+                job.status = JobStatus.FAILED
 
         except Exception as exc:
             error_msg = str(exc)
@@ -284,6 +310,7 @@ class AutonomyScheduler:
 
             is_tripped, backoff_delay = self.circuit_breaker.record_failure(job, error_msg)
             job.last_error = error_msg
+            job.last_status = "FAILED"
             if is_tripped:
                 job.enabled = False
                 job.status = JobStatus.SUSPENDED
@@ -323,6 +350,8 @@ class AutonomyScheduler:
                 self._running_job_ids.discard(job.id)
 
     def _default_runner(self, job: ScheduledJob) -> str:
-        """Default fallback execution simulation if no custom runner is provided."""
-        time.sleep(0.05)
-        return f"Autonomous task '{job.name}' completed successfully at {time.strftime('%Y-%m-%d %H:%M:%S')}."
+        """Fail-closed execution handler when no autonomous execution backend is configured."""
+        raise RuntimeError(
+            f"No autonomous execution backend configured for job '{job.name}' ({job.id}). "
+            f"Cannot execute goal: '{job.goal}'. Task execution failed: backend runner unavailable."
+        )

@@ -59,7 +59,10 @@ class AutonomyPolicyGate:
             )
 
         # 2. Tier-based enforcement
-        tier = getattr(tool, "tier", PermissionTier.SAFE)
+        if hasattr(tool, "operation_tier") and callable(tool.operation_tier):
+            tier = tool.operation_tier(arguments)
+        else:
+            tier = getattr(tool, "tier", PermissionTier.SAFE)
 
         if tier == PermissionTier.SAFE:
             return AutonomyDecision(
@@ -78,7 +81,7 @@ class AutonomyPolicyGate:
                 )
 
             # Check sandbox containment via PermissionGate
-            perm_check = self.permission_gate.check_tool_execution(tool.name, arguments)
+            perm_check = self.permission_gate.check_tool_execution(tool.name, arguments, tier=tier)
             if perm_check.is_allowed:
                 return AutonomyDecision(
                     allowed=True,

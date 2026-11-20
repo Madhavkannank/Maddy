@@ -221,11 +221,11 @@ class VerificationEngine:
                 passed_evidences.append(res.evidence)
 
         if all_passed:
-            outcome = VerificationOutcome.VERIFIED_SUCCESS
+            outcome = VerificationOutcome.VERIFIED
             summary = "; ".join(passed_evidences)
             can_proceed = True
         else:
-            outcome = VerificationOutcome.VERIFIED_FAILURE
+            outcome = VerificationOutcome.FAILED
             summary = "; ".join(failed_evidences)
             can_proceed = False
 
@@ -308,32 +308,52 @@ class VerificationEngine:
         Cross-checks claimed tool outcome with actual physical environment.
         If the tool claimed success but environment verification failed,
         overrides tool_result with honest failure to prevent hallucinated completion.
+        Never silently converts verification errors into verified success.
         """
-        assertions = self.generate_tool_assertions(tool_call)
-        if not assertions:
-            report = VerificationReport(
-                target_id=tool_call.name,
-                outcome=VerificationOutcome.UNVERIFIED,
-                evidence_summary="No automatic assertions for tool.",
-                can_proceed=tool_result.success,
-            )
+        try:
+            assertions = self.generate_tool_assertions(tool_call)
+            if not assertions:
+                report = VerificationReport(
+                    target_id=tool_call.name,
+                    outcome=VerificationOutcome.UNVERIFIED,
+                    evidence_summary="No automatic assertions defined for tool.",
+                    can_proceed=tool_result.success,
+                )
+                return tool_result, report
+
+            report = self.verify_report(assertions, target_id=tool_call.name)
+
+            # If tool claimed success but environment verification failed: OVERRIDE!
+            if tool_result.success and report.outcome in (VerificationOutcome.FAILED, VerificationOutcome.VERIFIED_FAILURE):
+                logger.warning(
+                    f"False completion detected for tool '{tool_call.name}'! "
+                    f"Tool returned success but environment verification failed: {report.evidence_summary}"
+                )
+                tool_result.success = False
+                tool_result.error = {
+                    "type": "VERIFICATION_FAILURE",
+                    "message": f"Environment verification failed: {report.evidence_summary}",
+                }
+
             return tool_result, report
 
-        report = self.verify_report(assertions, target_id=tool_call.name)
-
-        # If tool claimed success but environment verification failed: OVERRIDE!
-        if tool_result.success and report.outcome == VerificationOutcome.VERIFIED_FAILURE:
-            logger.warning(
-                f"False completion detected for tool '{tool_call.name}'! "
-                f"Tool returned success but environment verification failed: {report.evidence_summary}"
+        except Exception as exc:
+            logger.error(
+                f"Verification engine encountered unexpected error for tool '{tool_call.name}': {exc}",
+                exc_info=True,
+            )
+            report = VerificationReport(
+                target_id=tool_call.name,
+                outcome=VerificationOutcome.VERIFICATION_ERROR,
+                evidence_summary=f"Verification engine error: {exc}",
+                can_proceed=False,
             )
             tool_result.success = False
             tool_result.error = {
-                "type": "VERIFICATION_FAILURE",
-                "message": f"Environment verification failed: {report.evidence_summary}",
+                "type": "VERIFICATION_ERROR",
+                "message": f"Verification error encountered: {exc}",
             }
-
-        return tool_result, report
+            return tool_result, report
 
     def verify_task_completion(self, task_id: str, description: str, final_result: Any) -> VerificationReport:
         """

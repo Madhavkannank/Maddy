@@ -36,11 +36,30 @@ class AssertionType(Enum):
     # Custom assertion
     CUSTOM = "CUSTOM"
 
-class VerificationOutcome(Enum):
-    VERIFIED_SUCCESS = "VERIFIED_SUCCESS"
-    VERIFIED_FAILURE = "VERIFIED_FAILURE"
-    INDETERMINATE = "INDETERMINATE"
+class VerificationOutcome(str, Enum):
+    """Explicit outcomes for environment verification and grounding checks."""
+    VERIFIED = "VERIFIED"
     UNVERIFIED = "UNVERIFIED"
+    FAILED = "FAILED"
+    VERIFICATION_ERROR = "VERIFICATION_ERROR"
+
+    # Compatibility aliases for legacy interfaces
+    VERIFIED_SUCCESS = "VERIFIED"
+    VERIFIED_FAILURE = "FAILED"
+    INDETERMINATE = "UNVERIFIED"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "VerificationOutcome":
+        val_str = str(value).upper()
+        if val_str in ("VERIFIED", "VERIFIED_SUCCESS"):
+            return cls.VERIFIED
+        if val_str in ("FAILED", "VERIFIED_FAILURE"):
+            return cls.FAILED
+        if val_str in ("UNVERIFIED", "INDETERMINATE"):
+            return cls.UNVERIFIED
+        if val_str == "VERIFICATION_ERROR":
+            return cls.VERIFICATION_ERROR
+        return super()._missing_(value)
 
 @dataclass
 class Assertion:

@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -21,6 +22,13 @@ from core.errors import PermissionDeniedError
 _METAPATTERN_BLOCKS = re.compile(
     r"(\$\(|\`|>\(|<\(|;\s*|&&|\|\||\||>>|>|<|&|\n|\r|\btee\b)"
 )
+
+
+@dataclass
+class PermissionCheckResult:
+    """Structured result of a non-raising permission verification."""
+    is_allowed: bool
+    reason: str
 
 
 class PermissionTier(str, enum.Enum):
@@ -200,3 +208,34 @@ class PermissionGate:
             tier=tier.value,
             arguments=arguments,
         )
+
+    def check_tool_execution(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        tier: Optional[PermissionTier] = None,
+    ) -> PermissionCheckResult:
+        """Deterministic permission preflight returning a structured status instead of raising.
+
+        Used by AutonomyPolicyGate and external verification layers to evaluate
+        sandbox boundaries and authorization states cleanly.
+        """
+        if tier is None:
+            tier = PermissionTier.SYSTEM_IMPACTING
+
+        try:
+            self.check_permission(tool_name, tier, arguments)
+            return PermissionCheckResult(
+                is_allowed=True,
+                reason=f"Operation for tool '{tool_name}' authorized under deterministic permission policy.",
+            )
+        except PermissionDeniedError as pde:
+            return PermissionCheckResult(
+                is_allowed=False,
+                reason=pde.message,
+            )
+        except Exception as exc:
+            return PermissionCheckResult(
+                is_allowed=False,
+                reason=f"Permission check error: {str(exc)}",
+            )
